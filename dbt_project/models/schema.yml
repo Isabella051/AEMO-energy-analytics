@@ -1,0 +1,66 @@
+version: 2
+
+sources:
+  - name: bronze
+    description: "Raw Parquet files from AEMO NEM ingestion pipeline"
+    tables:
+      - name: dispatch_price
+        description: "5-minute dispatch prices per NEM region"
+        columns:
+          - name: REGIONID
+            tests: [not_null]
+          - name: SETTLEMENTDATE
+            tests: [not_null]
+          - name: RRP
+            tests: [not_null]
+
+      - name: wholesale_price
+        description: "30-minute trading (settlement) prices per NEM region"
+        columns:
+          - name: REGIONID
+            tests: [not_null]
+          - name: SETTLEMENTDATE
+            tests: [not_null]
+          - name: RRP
+            tests: [not_null]
+
+models:
+  - name: stg_dispatch_price
+    description: "Cleaned 5-min dispatch prices — Silver layer"
+    columns:
+      - name: region_id
+        tests: [not_null, accepted_values: {values: [NSW1, VIC1, QLD1, SA1, TAS1]}]
+      - name: settlement_ts
+        tests: [not_null]
+      - name: rrp_aud_mwh
+        tests: [not_null]
+
+  - name: stg_trading_price
+    description: "Cleaned 30-min trading prices — Silver layer"
+    columns:
+      - name: region_id
+        tests: [not_null, accepted_values: {values: [NSW1, VIC1, QLD1, SA1, TAS1]}]
+      - name: time_of_use_band
+        tests: [not_null, accepted_values: {values: [peak, off_peak]}]
+      - name: rrp_aud_mwh
+        tests: [not_null]
+
+  - name: fct_energy_cost
+    description: "Daily energy cost fact table — Gold layer, Power BI ready"
+    columns:
+      - name: region_id
+        tests: [not_null]
+      - name: settlement_date
+        tests: [not_null]
+      - name: avg_price_aud_mwh
+        tests: [not_null]
+      - name: spike_pct
+        description: "% of 30-min intervals where RRP > $300/MWh"
+
+  - name: dim_region
+    description: "NEM region reference dimension"
+    columns:
+      - name: region_id
+        tests: [not_null, unique]
+      - name: region_name
+        tests: [not_null]

@@ -1,0 +1,91 @@
+name: AEMO Analytics CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run ingestion + dbt refresh daily at 07:00 AEST (21:00 UTC)
+    - cron: "0 21 * * *"
+
+env:
+  DBT_PROFILES_DIR: ./dbt_project
+  BRONZE_PATH: ./data/bronze
+
+jobs:
+  # -----------------------------------------------------------------------
+  # Job 1: Data quality & dbt tests (runs on every push + PR)
+  # -----------------------------------------------------------------------
+  dbt-test:
+    name: dbt build & test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install dbt-duckdb nem-data pandas pyarrow apscheduler
+
+      - name: Pull sample data (last 7 days)
+        run: python ingestion/ingest.py --lookback-days 7
+
+      - name: dbt deps
+        working-directory: dbt_project
+        run: dbt deps
+
+      - name: dbt build (compile + run + test)
+        working-directory: dbt_project
+        run: dbt build --target ci
+
+      - name: Upload dbt docs
+        if: github.ref == 'refs/heads/main'
+        working-directory: dbt_project
+        run: dbt docs generate
+
+      - uses: actions/upload-artifact@v4
+        if: github.ref == 'refs/heads/main'
+        with:
+          name: dbt-docs
+          path: dbt_project/target/
+
+  # -----------------------------------------------------------------------
+  # Job 2: Deploy to production (only on main branch merge)
+  # -----------------------------------------------------------------------
+  deploy:
+    name: Deploy to production
+    runs-on: ubuntu-latest
+    needs: dbt-test
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install dbt-duckdb nem-data pandas pyarrow apscheduler requests
+
+      - name: Pull latest AEMO data (last 2 days)
+        run: python ingestion/ingest.py --lookback-days 2
+
+      - name: dbt run (production)
+        working-directory: dbt_project
+        run: dbt run --target prod
+
+      - name: Trigger Power BI dataset refresh
+        env:
+          POWERBI_TENANT_ID: ${{ secrets.POWERBI_TENANT_ID }}
+          POWERBI_CLIENT_ID: ${{ secrets.POWERBI_CLIENT_ID }}
+          POWERBI_CLIENT_SECRET: ${{ secrets.POWERBI_CLIENT_SECRET }}
+          POWERBI_DATASET_ID: ${{ secrets.POWERBI_DATASET_ID }}
+        run: python ingestion/refresh_powerbi.py
