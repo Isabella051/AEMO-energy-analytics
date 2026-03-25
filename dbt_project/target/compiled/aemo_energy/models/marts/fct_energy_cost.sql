@@ -3,7 +3,7 @@
 
 with staging as (
 
-    select * from {{ ref('stg_price_and_demand') }}
+    select * from "dev"."main_staging"."stg_price_and_demand"
 
 ),
 

@@ -1,0 +1,11 @@
+version: 2
+
+sources:
+  - name: bronze
+    schema: main
+    tables:
+      - name: price_and_demand
+        description: "Raw AEMO price and demand Parquet files"
+        external:
+          location: "data/bronze/price_and_demand/*.parquet"
+          format: parquet

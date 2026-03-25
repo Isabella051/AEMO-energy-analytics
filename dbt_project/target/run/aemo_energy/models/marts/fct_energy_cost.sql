@@ -1,9 +1,18 @@
--- models/marts/fct_energy_cost.sql
+
+  
+    
+    
+
+    create  table
+      "dev"."main_marts"."fct_energy_cost__dbt_tmp"
+  
+    as (
+      -- models/marts/fct_energy_cost.sql
 -- Gold layer: daily energy cost fact table, ready for Power BI
 
 with staging as (
 
-    select * from {{ ref('stg_price_and_demand') }}
+    select * from "dev"."main_staging"."stg_price_and_demand"
 
 ),
 
@@ -58,3 +67,6 @@ with_derived as (
 )
 
 select * from with_derived
+    );
+  
+  

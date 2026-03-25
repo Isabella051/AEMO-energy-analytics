@@ -1,16 +1,19 @@
 """
 AEMO NEM Energy Data Ingestion Pipeline
-Pulls electricity price and demand data via nem-data,
-lands raw Parquet files into the Bronze layer (local or ADLS).
+Pulls electricity price & demand data directly from AEMO official CSV URLs,
+lands raw Parquet files into the Bronze layer.
+
+Data source: AEMO Price and Demand CSV files
+URL pattern: https://aemo.com.au/aemo/data/nem/priceanddemand/PRICE_AND_DEMAND_{YYYYMM}_{REGION}.csv
 """
 
-import os
 import logging
+import requests
 from datetime import datetime, timedelta
 from pathlib import Path
+import os
 
 import pandas as pd
-from nemdata import load
 
 logging.basicConfig(
     level=logging.INFO,
@@ -18,91 +21,79 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
-
-REGIONS = ["NSW1", "VIC1", "QLD1", "SA1", "TAS1"]
 BRONZE_PATH = Path(os.getenv("BRONZE_PATH", "data/bronze"))
-
-# Tables to pull — see nem-data docs for full list
-TABLES = {
-    "trading-price": "wholesale_price",   # 30-min settlement price per region
-    "dispatch-price": "dispatch_price",   # 5-min dispatch price per region
-}
+REGIONS = ["NSW1", "VIC1", "QLD1", "SA1", "TAS1"]
+BASE_URL = "https://aemo.com.au/aemo/data/nem/priceanddemand"
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def get_date_range(lookback_days: int = 30):
-    """Return (start, end) as YYYY-MM-DD strings."""
+def get_months(lookback_days: int = 60):
+    """Return list of YYYYMM strings covering the lookback period."""
     end = datetime.utcnow().date()
     start = end - timedelta(days=lookback_days)
-    return str(start), str(end)
+    months = set()
+    current = start.replace(day=1)
+    while current <= end:
+        months.add(current.strftime("%Y%m"))
+        if current.month == 12:
+            current = current.replace(year=current.year + 1, month=1)
+        else:
+            current = current.replace(month=current.month + 1)
+    return sorted(months)
 
 
-def pull_table(table_name: str, start: str, end: str) -> pd.DataFrame:
-    """Download a NEM table for the given date range."""
-    log.info(f"Pulling {table_name}  {start} → {end}")
-    df = load(table_name, start=start, end=end)
-    log.info(f"  Rows fetched: {len(df):,}")
-    return df
+def fetch_region_month(region: str, yyyymm: str):
+    """Fetch one region/month CSV from AEMO and return as DataFrame."""
+    url = f"{BASE_URL}/PRICE_AND_DEMAND_{yyyymm}_{region}.csv"
+    try:
+        r = requests.get(url, timeout=30)
+        if r.status_code != 200:
+            log.warning(f"  Not available: {region} {yyyymm} (HTTP {r.status_code})")
+            return None
+        from io import StringIO
+        df = pd.read_csv(StringIO(r.text))
+        df["region_id"] = region
+        df["_source_url"] = url
+        df["_ingested_at"] = datetime.utcnow().isoformat()
+        log.info(f"  Fetched {len(df):,} rows — {region} {yyyymm}")
+        return df
+    except Exception as e:
+        log.error(f"  Error fetching {region} {yyyymm}: {e}")
+        return None
 
 
-def add_metadata(df: pd.DataFrame, table_name: str) -> pd.DataFrame:
-    """Stamp every row with ingestion metadata."""
-    df = df.copy()
-    df["_source_table"] = table_name
-    df["_ingested_at"] = datetime.utcnow().isoformat()
-    return df
-
-
-def save_bronze(df: pd.DataFrame, layer_name: str, start: str, end: str):
-    """Partition by year-month and write Parquet to Bronze layer."""
-    out_dir = BRONZE_PATH / layer_name
+def save_bronze(df: pd.DataFrame, yyyymm: str):
+    """Save a month's data to Bronze layer as Parquet."""
+    out_dir = BRONZE_PATH / "price_and_demand"
     out_dir.mkdir(parents=True, exist_ok=True)
-
-    # Partition by month for efficient downstream reads
-    if "SETTLEMENTDATE" in df.columns:
-        df["SETTLEMENTDATE"] = pd.to_datetime(df["SETTLEMENTDATE"])
-        for ym, group in df.groupby(df["SETTLEMENTDATE"].dt.to_period("M")):
-            path = out_dir / f"{ym}.parquet"
-            group.to_parquet(path, index=False)
-            log.info(f"  Saved {len(group):,} rows → {path}")
-    else:
-        path = out_dir / f"{start}_{end}.parquet"
-        df.to_parquet(path, index=False)
-        log.info(f"  Saved {len(df):,} rows → {path}")
+    path = out_dir / f"{yyyymm}.parquet"
+    df.to_parquet(path, index=False)
+    log.info(f"Saved {len(df):,} rows → {path}")
 
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+def run(lookback_days: int = 60):
+    months = get_months(lookback_days)
+    log.info(f"=== AEMO ingestion: {months[0]} → {months[-1]} ({len(months)} months) ===")
 
-def run(lookback_days: int = 30):
-    start, end = get_date_range(lookback_days)
-    log.info(f"=== AEMO ingestion run: {start} → {end} ===")
+    for yyyymm in months:
+        frames = []
+        for region in REGIONS:
+            df = fetch_region_month(region, yyyymm)
+            if df is not None:
+                frames.append(df)
 
-    for table_name, layer_name in TABLES.items():
-        try:
-            df = pull_table(table_name, start, end)
-            df = add_metadata(df, table_name)
-            save_bronze(df, layer_name, start, end)
-        except Exception as e:
-            log.error(f"Failed to pull {table_name}: {e}")
+        if frames:
+            combined = pd.concat(frames, ignore_index=True)
+            save_bronze(combined, yyyymm)
+        else:
+            log.warning(f"No data fetched for {yyyymm}")
 
     log.info("=== Ingestion complete ===")
+    log.info(f"Bronze files saved to: {BRONZE_PATH / 'price_and_demand'}")
 
 
 if __name__ == "__main__":
     import argparse
-
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--lookback-days", type=int, default=30,
-        help="How many days of history to pull (default: 30)"
-    )
+    parser.add_argument("--lookback-days", type=int, default=60)
     args = parser.parse_args()
     run(args.lookback_days)
